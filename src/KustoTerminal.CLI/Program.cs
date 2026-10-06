@@ -93,7 +93,7 @@ class Program
         catch (Exception ex)
         {
             Console.WriteLine(managedRequested
-                ? "Managed shell startup failed. Windows and a valid parent shell session are required."
+                ? "Managed shell startup failed. A supported platform and valid parent shell session are required."
                 : $"Fatal error: {ex.ToString()}");
             if (managedRequested) Environment.ExitCode = 1;
             if (!managedRequested && !Console.IsInputRedirected)

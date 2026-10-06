@@ -9,6 +9,28 @@ using KustoTerminal.UI;
 using KustoTerminal.UI.Panes;
 using KustoTerminal.UI.Services;
 
+if (args.FirstOrDefault() == "--socket-peer")
+{
+    if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
+    await LinuxSocketTests.RunPeerAsync(args[1], args[2]);
+    return;
+}
+if (args.FirstOrDefault() == "--interop-client")
+{
+    using var channel = await ManagedTokenChannel.ConnectAsync(ManagedShellOptions.Parse(args[1..])!);
+    using var session = new ManagedSession(channel);
+    for (var i = 0; i < 2; i++)
+    {
+        var builder = await session.CreateConnectionStringBuilderAsync(session.CreateConnection());
+        if (!builder.FederatedSecurity || builder.DstsFederatedSecurity || string.IsNullOrEmpty(builder.UserToken))
+            throw new Exception("Interop MSAL SDK mode failed.");
+    }
+    Console.WriteLine("PASS: production transport, two acquisitions, fixed-target MSAL SDK builders (no tokens logged).");
+    return;
+}
+if (OperatingSystem.IsLinux())
+    await LinuxSocketTests.RunAsync();
+
 using var fixtures = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "wire-fixtures.json")));
 if (args.SequenceEqual(new[] { "--emit-protocol-fixtures" }))
 {
@@ -37,7 +59,7 @@ foreach (var name in new[] { "MsalResponse", "DstsResponse", "ErrorResponse" })
     using var stream = new ParentStream((id, _) =>
         fixtures.RootElement.GetProperty(name).GetRawText().Replace("fixture-1", id));
     using var channel = new ManagedTokenChannel(stream, options);
-    if (name == "ErrorResponse")
+    if (name == "ErrorResponse" || (name == "DstsResponse" && !OperatingSystem.IsWindows()))
         await Reject(() => channel.AcquireAsync(), "error fixture");
     else
     {
@@ -69,7 +91,7 @@ string Response(string id, int scheme = 0, string token = "synthetic-token", Dat
         Version = 1, RequestId = id, Scheme = scheme, AccessToken = token,
         ExpiresOn = expiry ?? now.AddHours(1), ErrorCode = error });
 
-using (var stream = new ParentStream((id, n) => Response(id, n % 2, $"synthetic-{n}")))
+using (var stream = new ParentStream((id, n) => Response(id, OperatingSystem.IsWindows() ? n % 2 : 0, $"synthetic-{n}")))
 using (var channel = new ManagedTokenChannel(stream, options))
 using (var session = new ManagedSession(channel))
 {
@@ -78,8 +100,8 @@ using (var session = new ManagedSession(channel))
     var second = await session.CreateConnectionStringBuilderAsync(connection);
     Check(first.UserToken == "synthetic-0" && first.FederatedSecurity && !first.DstsFederatedSecurity,
         "MSAL SDK mode");
-    Check(second.UserToken == "synthetic-1" && second.DstsFederatedSecurity && !second.FederatedSecurity,
-        "dSTS SDK mode");
+    Check(second.UserToken == "synthetic-1" && second.DstsFederatedSecurity == OperatingSystem.IsWindows() &&
+        second.FederatedSecurity != OperatingSystem.IsWindows(), "renewed OS-appropriate SDK mode");
     Check(first.InitialCatalog == "db" && first.DataSource == options.ClusterUri, "builder target");
     await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => session.CreateConnectionStringBuilderAsync(connection)));
     Check(stream.Requests == 10 && stream.MaximumConcurrent == 1, "serialized renewal");
@@ -171,7 +193,7 @@ using (var stream = new ParentStream((id, _) => Response(id), stall: true))
     Check(stream.Closed, "dispose closes channel");
 }
 if (!OperatingSystem.IsWindows())
-    await Reject(() => ManagedTokenChannel.ConnectAsync(options), "no Linux managed mode");
+    await Reject(() => ManagedTokenChannel.ConnectAsync(options), "Windows pipes rejected on other platforms");
 using (var stream = new ParentStream((id, _) => Response(id, error: "authentication-failed")))
 using (var channel = new ManagedTokenChannel(stream, options))
 using (var session = new ManagedSession(channel))
